@@ -17,3 +17,5 @@ NAIA 2.0용 Prompt Library 모듈 샘플 구현.
 - 로그 목록/미리보기 UI
 
 - 로컬 해부학 판별 권장 실패 규칙: `detected_errors > anatomy_error_limit`
+- MainController 브릿지 필요: `prompt_library_event_requested` subscribe 핸들러가 없으면 대기열/생성 동작 불가
+- 모듈은 publish 시 `event_publish` 로그를 남기며, 브릿지 미연결 감지 시 `bridge_warning` 로그를 남김

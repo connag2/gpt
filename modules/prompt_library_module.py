@@ -175,6 +175,7 @@ class PromptLibraryModule(BaseMiddleModule):
         self.queue_list: Optional[QListWidget] = None
 
         self._files: List[Path] = []
+        self._bridge_listener_count: Optional[int] = None
 
     def get_title(self) -> str:
         return "📚 프롬프트 라이브러리"
@@ -560,7 +561,9 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
             return
         root = str(self.naia_root) if self.naia_root else "(none)"
         lib = str(self.library_dir) if self.library_dir else "(none)"
-        self.info_label.setText(f"root={root} ({self.root_source}) | lib={lib} | scan={scan_count} shown={shown_count}")
+        listeners = self._bridge_listener_count if self._bridge_listener_count is not None else self._detect_event_listener_count()
+        bridge = f"bridge=listeners:{listeners}" if listeners >= 0 else "bridge=unknown"
+        self.info_label.setText(f"root={root} ({self.root_source}) | lib={lib} | scan={scan_count} shown={shown_count} | {bridge}")
 
     def open_folder(self):
         self._open_path(self.library_dir)
@@ -676,12 +679,48 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
                 out.append(str(it.data(Qt.ItemDataRole.UserRole)))
         return out
 
+
+    def _detect_event_listener_count(self) -> int:
+        if not self.app_context:
+            return -1
+        for attr in ("subscribers", "_subscribers", "event_subscribers", "_event_subscribers"):
+            try:
+                registry = getattr(self.app_context, attr, None)
+                if isinstance(registry, dict):
+                    listeners = registry.get(EVENT_NAME, [])
+                    if isinstance(listeners, list):
+                        return len(listeners)
+            except Exception:
+                pass
+        return -1
+
+    def _warn_if_bridge_missing(self, action: str):
+        listeners = self._detect_event_listener_count()
+        self._bridge_listener_count = listeners
+        if listeners == 0:
+            warn = (
+                "MainController 브릿지가 연결되지 않아 요청이 처리되지 않을 수 있습니다. "
+                "app_context.subscribe('prompt_library_event_requested', handler) 확인 필요"
+            )
+            self._write_fix_log("bridge_warning", "(none)", warn, {"action": action})
+            QMessageBox.warning(self.widget, "브릿지 연결 필요", warn)
+
     def publish(self, payload: Dict[str, Any]):
+        action = str(payload.get("action", "(unknown)"))
+        self._warn_if_bridge_missing(action)
         if not self.app_context or not hasattr(self.app_context, "publish"):
             self._write_fix_log("error", "(none)", "AppContext.publish 없음", payload)
             QMessageBox.warning(self.widget, "오류", "AppContext.publish를 찾지 못했습니다.")
             return
         self.app_context.publish(EVENT_NAME, payload)
+        self._write_fix_log("event_publish", "(none)", f"publish:{action}", {
+            "action": action,
+            "paths_count": len(payload.get("paths", [])) if isinstance(payload.get("paths", []), list) else 0,
+            "run": payload.get("run"),
+        })
+        self.reload_log_list()
+        if self._files:
+            self.update_info(len(self._files), self.table.rowCount() if self.table else 0)
 
     def request_apply_replace(self):
         paths = self.get_selected_paths()
