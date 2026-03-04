@@ -3,15 +3,16 @@ from __future__ import annotations
 """
 NAIA Prompt Library Module
 
-기능 요약
-- <NAIA_ROOT>/save/prompt_library/*.txt 스캔/검색/편집
-- 단일 교체/단일 생성/다중 대기열 이벤트 publish
-- prompt.txt -> 1.txt,2.txt... 분할 생성
-- 자연 정렬(1,2,3,...,10)
-- 이미지 생성 결과 자동 점검+재시도 요청 payload 생성
-- 수정 로그를 번호형 텍스트(1.txt,2.txt...)로 저장
+- prompt_library/*.txt 목록/검색/편집
+- 단일 적용/생성/대기열 publish
+- prompt.txt 분할(1.txt,2.txt...)
+- 자연 정렬
+- Auto Refine 요청 payload 발행
+- API 설정 저장/불러오기
+- 실행/오류 로그를 fix_logs/*.txt로 저장 + UI에서 조회
 """
 
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -21,9 +22,14 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QBrush, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -105,9 +111,10 @@ class PromptLibraryModule(BaseMiddleModule):
 
         self.app_context = None
         self.naia_root: Optional[Path] = None
-        self.root_source: str = ""
+        self.root_source = ""
         self.library_dir: Optional[Path] = None
         self.log_dir: Optional[Path] = None
+        self.api_settings_path: Optional[Path] = None
 
         self.widget: Optional[QWidget] = None
         self.info_label: Optional[QLabel] = None
@@ -119,13 +126,18 @@ class PromptLibraryModule(BaseMiddleModule):
         self.name_edit: Optional[QLineEdit] = None
         self.text_edit: Optional[QTextEdit] = None
 
-        self.image_path_edit: Optional[QLineEdit] = None
-        self.provider_edit: Optional[QLineEdit] = None
+        self.provider_combo: Optional[QComboBox] = None
         self.model_edit: Optional[QLineEdit] = None
+        self.api_key_edit: Optional[QLineEdit] = None
+        self.base_url_edit: Optional[QLineEdit] = None
+        self.image_path_edit: Optional[QLineEdit] = None
         self.max_retry_edit: Optional[QLineEdit] = None
         self.seed_step_edit: Optional[QLineEdit] = None
         self.issue_hint_edit: Optional[QLineEdit] = None
         self.fix_log_edit: Optional[QTextEdit] = None
+
+        self.log_list: Optional[QListWidget] = None
+        self.log_preview: Optional[QTextEdit] = None
 
         self._files: List[Path] = []
 
@@ -141,6 +153,7 @@ class PromptLibraryModule(BaseMiddleModule):
         self.naia_root, self.root_source = _find_naia_root(context)
         self.library_dir = (self.naia_root / "save" / "prompt_library").resolve()
         self.log_dir = (self.library_dir / "fix_logs").resolve()
+        self.api_settings_path = (self.library_dir / "api_settings.json").resolve()
 
     def on_initialize(self):
         if self.library_dir:
@@ -156,7 +169,6 @@ class PromptLibraryModule(BaseMiddleModule):
 
         self.info_label = QLabel("")
         self.info_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.info_label.setStyleSheet("opacity: 0.92;")
         root.addWidget(self.info_label)
 
         top = QHBoxLayout()
@@ -210,17 +222,12 @@ QHeaderView::section {
   padding: 6px;
   border: 1px solid rgba(255,255,255,0.08);
 }
-QTableWidget::item {
-  padding: 6px;
-  color: #EDEDED;
-}
 QTableWidget::item:selected {
   background: rgba(120,160,255,0.35);
   color: #FFFFFF;
 }
 """
         )
-
         self.table.itemSelectionChanged.connect(self.on_table_select)
         root.addWidget(self.table, 2)
 
@@ -233,7 +240,7 @@ QTableWidget::item:selected {
         btn_gen1.clicked.connect(self.request_generate_single)
         actions.addWidget(btn_gen1)
 
-        btn_queue_sel = QPushButton("선택 여러개 대기열(시퀀스)")
+        btn_queue_sel = QPushButton("선택 여러개 대기열")
         btn_queue_sel.clicked.connect(self.request_queue_selected)
         actions.addWidget(btn_queue_sel)
 
@@ -244,45 +251,8 @@ QTableWidget::item:selected {
         actions.addStretch(1)
         root.addLayout(actions)
 
-        auto_row1 = QHBoxLayout()
-        self.image_path_edit = QLineEdit()
-        self.image_path_edit.setPlaceholderText("검수할 이미지 경로(예: D:/out/last.png)")
-        auto_row1.addWidget(QLabel("이미지"))
-        auto_row1.addWidget(self.image_path_edit, 2)
-
-        self.provider_edit = QLineEdit("openai")
-        self.provider_edit.setPlaceholderText("openai / gemini")
-        auto_row1.addWidget(QLabel("API"))
-        auto_row1.addWidget(self.provider_edit, 1)
-
-        self.model_edit = QLineEdit("gpt-4.1")
-        self.model_edit.setPlaceholderText("모델명")
-        auto_row1.addWidget(QLabel("모델"))
-        auto_row1.addWidget(self.model_edit, 1)
-        root.addLayout(auto_row1)
-
-        auto_row2 = QHBoxLayout()
-        self.max_retry_edit = QLineEdit("3")
-        self.seed_step_edit = QLineEdit("97")
-        self.issue_hint_edit = QLineEdit()
-        self.issue_hint_edit.setPlaceholderText("문제 힌트(선택): 예) 손가락 이상, 배경 깨짐")
-
-        auto_row2.addWidget(QLabel("최대재시도"))
-        auto_row2.addWidget(self.max_retry_edit)
-        auto_row2.addWidget(QLabel("시드증분"))
-        auto_row2.addWidget(self.seed_step_edit)
-        auto_row2.addWidget(QLabel("힌트"))
-        auto_row2.addWidget(self.issue_hint_edit, 2)
-
-        btn_auto = QPushButton("자동 점검+재생성 요청")
-        btn_auto.clicked.connect(self.request_auto_refine_generate)
-        auto_row2.addWidget(btn_auto)
-        root.addLayout(auto_row2)
-
-        self.fix_log_edit = QTextEdit()
-        self.fix_log_edit.setPlaceholderText("무엇을 고쳤는지 간단히 입력 (요청 시 자동 로그 파일로 저장됨)")
-        self.fix_log_edit.setMaximumHeight(72)
-        root.addWidget(self.fix_log_edit)
+        root.addWidget(self._build_auto_refine_box())
+        root.addWidget(self._build_logs_box())
 
         fold_row = QHBoxLayout()
         self.fold_btn = QToolButton()
@@ -291,22 +261,16 @@ QTableWidget::item:selected {
         self.fold_btn.setChecked(True)
         self.fold_btn.clicked.connect(self.toggle_editor)
         fold_row.addWidget(self.fold_btn)
-
-        btn_save_log = QPushButton("수정 로그만 저장")
-        btn_save_log.clicked.connect(self.save_fix_log_only)
-        fold_row.addWidget(btn_save_log)
-
         fold_row.addStretch(1)
         root.addLayout(fold_row)
 
         self.editor_container = QWidget()
         editor_layout = QVBoxLayout(self.editor_container)
         editor_layout.setContentsMargins(0, 0, 0, 0)
-        editor_layout.setSpacing(6)
-
         row_name = QHBoxLayout()
+
         self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("파일명(확장자 제외) 예: 001_웃는얼굴")
+        self.name_edit.setPlaceholderText("파일명(확장자 제외)")
         row_name.addWidget(QLabel("이름"))
         row_name.addWidget(self.name_edit, 1)
 
@@ -325,15 +289,121 @@ QTableWidget::item:selected {
         editor_layout.addLayout(row_name)
 
         self.text_edit = QTextEdit()
-        self.text_edit.setPlaceholderText("프롬프트 내용을 입력(한 줄/여러 줄 모두 OK)")
+        self.text_edit.setPlaceholderText("프롬프트 내용")
         self.text_edit.setMinimumHeight(120)
         editor_layout.addWidget(self.text_edit, 1)
 
         root.addWidget(self.editor_container, 1)
 
         self.search_edit.setText("")
+        self._load_api_settings()
         self.reload()
+        self.reload_log_list()
         return self.widget
+
+    def _build_auto_refine_box(self) -> QGroupBox:
+        box = QGroupBox("자동 점검 + 재생성 (API 설정 포함)")
+        grid = QGridLayout(box)
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(["openai", "gemini"])
+        self.model_edit = QLineEdit("gpt-4.1")
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_edit.setPlaceholderText("API Key")
+        self.base_url_edit = QLineEdit()
+        self.base_url_edit.setPlaceholderText("선택: 커스텀 base_url")
+
+        self.image_path_edit = QLineEdit()
+        self.image_path_edit.setPlaceholderText("검수할 이미지 경로")
+        self.max_retry_edit = QLineEdit("3")
+        self.seed_step_edit = QLineEdit("97")
+        self.issue_hint_edit = QLineEdit()
+        self.issue_hint_edit.setPlaceholderText("문제 힌트(선택)")
+        self.fix_log_edit = QTextEdit()
+        self.fix_log_edit.setPlaceholderText("무엇을 고쳤는지/고칠지")
+        self.fix_log_edit.setMaximumHeight(64)
+
+        row = 0
+        grid.addWidget(QLabel("Provider"), row, 0)
+        grid.addWidget(self.provider_combo, row, 1)
+        grid.addWidget(QLabel("Model"), row, 2)
+        grid.addWidget(self.model_edit, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("API Key"), row, 0)
+        grid.addWidget(self.api_key_edit, row, 1, 1, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Base URL"), row, 0)
+        grid.addWidget(self.base_url_edit, row, 1, 1, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Image Path"), row, 0)
+        grid.addWidget(self.image_path_edit, row, 1, 1, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Max Retry"), row, 0)
+        grid.addWidget(self.max_retry_edit, row, 1)
+        grid.addWidget(QLabel("Seed Step"), row, 2)
+        grid.addWidget(self.seed_step_edit, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Issue Hint"), row, 0)
+        grid.addWidget(self.issue_hint_edit, row, 1, 1, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Fix Note"), row, 0)
+        grid.addWidget(self.fix_log_edit, row, 1, 1, 3)
+        row += 1
+
+        btn_row = QHBoxLayout()
+        btn_save_api = QPushButton("API 설정 저장")
+        btn_save_api.clicked.connect(self._save_api_settings)
+        btn_row.addWidget(btn_save_api)
+
+        btn_load_api = QPushButton("API 설정 불러오기")
+        btn_load_api.clicked.connect(self._load_api_settings)
+        btn_row.addWidget(btn_load_api)
+
+        btn_auto = QPushButton("자동 점검+재생성 요청")
+        btn_auto.clicked.connect(self.request_auto_refine_generate)
+        btn_row.addWidget(btn_auto)
+
+        btn_log_only = QPushButton("수정 로그만 저장")
+        btn_log_only.clicked.connect(self.save_fix_log_only)
+        btn_row.addWidget(btn_log_only)
+
+        btn_row.addStretch(1)
+        grid.addLayout(btn_row, row, 0, 1, 4)
+        return box
+
+    def _build_logs_box(self) -> QGroupBox:
+        box = QGroupBox("실행/오류 로그")
+        v = QVBoxLayout(box)
+        top = QHBoxLayout()
+
+        btn_reload = QPushButton("로그 새로고침")
+        btn_reload.clicked.connect(self.reload_log_list)
+        top.addWidget(btn_reload)
+
+        btn_open = QPushButton("로그 폴더 열기")
+        btn_open.clicked.connect(self.open_log_folder)
+        top.addWidget(btn_open)
+
+        top.addStretch(1)
+        v.addLayout(top)
+
+        body = QHBoxLayout()
+        self.log_list = QListWidget()
+        self.log_list.itemClicked.connect(self.on_log_selected)
+        body.addWidget(self.log_list, 1)
+
+        self.log_preview = QTextEdit()
+        self.log_preview.setReadOnly(True)
+        body.addWidget(self.log_preview, 2)
+        v.addLayout(body)
+        return box
 
     def reload(self):
         if not self.library_dir:
@@ -343,12 +413,9 @@ QTableWidget::item:selected {
             return
 
         files: List[Path] = []
-        try:
-            for p in self.library_dir.rglob("*"):
-                if p.is_file() and p.suffix.lower() == ".txt" and p.parent != self.log_dir:
-                    files.append(p)
-        except Exception:
-            files = []
+        for p in self.library_dir.rglob("*"):
+            if p.is_file() and p.suffix.lower() == ".txt" and p.parent != self.log_dir:
+                files.append(p)
 
         self._files = sorted(files, key=_natural_key)
         self.apply_filter()
@@ -363,8 +430,8 @@ QTableWidget::item:selected {
         if not self.table:
             return
         self.table.setRowCount(0)
-
         fg = QBrush(QColor(237, 237, 237))
+
         for p in files:
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -373,7 +440,6 @@ QTableWidget::item:selected {
             name_item = QTableWidgetItem(p.stem)
             name_item.setForeground(fg)
             name_item.setData(Qt.ItemDataRole.UserRole, str(p))
-
             path_item = QTableWidgetItem(str(p))
             path_item.setForeground(fg)
             path_item.setData(Qt.ItemDataRole.UserRole, str(p))
@@ -389,43 +455,43 @@ QTableWidget::item:selected {
             return
         root = str(self.naia_root) if self.naia_root else "(none)"
         lib = str(self.library_dir) if self.library_dir else "(none)"
-        q = (self.search_edit.text() if self.search_edit else "").strip() or "(공백=전체)"
         self.info_label.setText(
-            f"root={root} ({self.root_source}) | lib={lib} | scan={scan_count} shown={shown_count} | q={q}"
+            f"root={root} ({self.root_source}) | lib={lib} | scan={scan_count} shown={shown_count}"
         )
 
     def open_folder(self):
-        if not self.library_dir:
+        self._open_path(self.library_dir)
+
+    def open_log_folder(self):
+        self._open_path(self.log_dir)
+
+    def _open_path(self, path: Optional[Path]):
+        if not path:
             return
         try:
             import os
 
-            os.startfile(str(self.library_dir.resolve()))
+            os.startfile(str(path.resolve()))
         except Exception:
-            QMessageBox.information(self.widget, "폴더", f"여기에 저장돼요:\n{self.library_dir.resolve()}")
+            QMessageBox.information(self.widget, "경로", str(path.resolve()))
 
     def split_prompt_txt(self):
         if not self.library_dir:
             return
         source = self.library_dir / "prompt.txt"
         if not source.exists():
-            QMessageBox.information(self.widget, "분할", f"파일이 없어: {source}")
+            QMessageBox.information(self.widget, "분할", f"파일 없음: {source}")
             return
 
-        raw = _read_text_file(source)
-        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        lines = [line.strip() for line in _read_text_file(source).splitlines() if line.strip()]
         if not lines:
-            QMessageBox.information(self.widget, "분할", "prompt.txt에 유효한 줄이 없어.")
+            QMessageBox.information(self.widget, "분할", "prompt.txt에 유효한 줄이 없습니다.")
             return
 
-        created = 0
         for idx, line in enumerate(lines, start=1):
-            out = self.library_dir / f"{idx}.txt"
-            out.write_text(line + "\n", encoding="utf-8")
-            created += 1
-
+            (self.library_dir / f"{idx}.txt").write_text(line + "\n", encoding="utf-8")
         self.reload()
-        QMessageBox.information(self.widget, "분할 완료", f"{created}개 생성됨")
+        QMessageBox.information(self.widget, "완료", f"{len(lines)}개 파일 생성")
 
     def toggle_editor(self):
         if not self.fold_btn or not self.editor_container:
@@ -445,31 +511,30 @@ QTableWidget::item:selected {
             return
         name = (self.name_edit.text() if self.name_edit else "").strip()
         if not name:
-            QMessageBox.information(self.widget, "알림", "이름(파일명)을 입력해줘!")
+            QMessageBox.information(self.widget, "알림", "파일명을 입력하세요.")
             return
 
         for ch in '<>:"/\\|?*':
             name = name.replace(ch, "_")
 
         text = _normalize_prompt_text(self.text_edit.toPlainText() if self.text_edit else "")
-        if not text.strip():
-            QMessageBox.information(self.widget, "알림", "내용이 비어있어!")
+        if not text:
+            QMessageBox.information(self.widget, "알림", "내용이 비어 있습니다.")
             return
 
-        path = self.library_dir / f"{name}.txt"
-        path.write_text(text + "\n", encoding="utf-8")
+        (self.library_dir / f"{name}.txt").write_text(text + "\n", encoding="utf-8")
         self.reload()
 
     def delete_item(self):
         paths = self.get_selected_paths()
         if len(paths) != 1:
-            QMessageBox.information(self.widget, "알림", "삭제는 1개만 선택해줘!")
+            QMessageBox.information(self.widget, "알림", "삭제는 1개만 선택하세요.")
             return
+
         p = Path(paths[0])
         if not p.exists():
             return
-        res = QMessageBox.question(self.widget, "삭제", f"정말 삭제할까?\n{p.name}")
-        if res != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self.widget, "삭제", f"삭제할까요?\n{p.name}") != QMessageBox.StandardButton.Yes:
             return
         p.unlink(missing_ok=True)
         self.reload()
@@ -478,20 +543,21 @@ QTableWidget::item:selected {
         paths = self.get_selected_paths()
         if len(paths) != 1:
             return
+
         p = Path(paths[0])
         if not p.exists():
             return
-        text = _read_text_file(p)
+
         if self.name_edit:
             self.name_edit.setText(p.stem)
         if self.text_edit:
-            self.text_edit.setPlainText(text)
+            self.text_edit.setPlainText(_read_text_file(p))
 
     def get_selected_paths(self) -> List[str]:
         if not self.table:
             return []
         rows = {it.row() for it in self.table.selectedItems()}
-        out: List[str] = []
+        out = []
         for r in sorted(rows):
             it = self.table.item(r, 0)
             if it:
@@ -501,7 +567,7 @@ QTableWidget::item:selected {
     def get_visible_paths(self) -> List[str]:
         if not self.table:
             return []
-        out: List[str] = []
+        out = []
         for r in range(self.table.rowCount()):
             it = self.table.item(r, 0)
             if it:
@@ -510,57 +576,63 @@ QTableWidget::item:selected {
 
     def publish(self, payload: Dict[str, Any]):
         if not self.app_context or not hasattr(self.app_context, "publish"):
-            QMessageBox.warning(self.widget, "오류", "AppContext.publish를 찾지 못했어.")
+            self._write_fix_log("error", "(none)", "AppContext.publish 없음", payload)
+            QMessageBox.warning(self.widget, "오류", "AppContext.publish를 찾지 못했습니다.")
             return
         self.app_context.publish(EVENT_NAME, payload)
 
     def request_apply_replace(self):
         paths = self.get_selected_paths()
         if len(paths) != 1:
-            QMessageBox.information(self.widget, "알림", "‘교체’는 1개만 선택해줘!")
+            QMessageBox.information(self.widget, "알림", "‘교체’는 1개만 선택하세요.")
             return
         self.publish({"action": "apply_replace", "paths": [paths[0]], "run": False})
 
     def request_generate_single(self):
         paths = self.get_selected_paths()
         if len(paths) != 1:
-            QMessageBox.information(self.widget, "알림", "‘바로 생성’은 1개만 선택해줘!")
+            QMessageBox.information(self.widget, "알림", "‘바로 생성’은 1개만 선택하세요.")
             return
         self.publish({"action": "generate_single", "paths": [paths[0]], "run": True})
 
     def request_queue_selected(self):
         paths = self.get_selected_paths()
         if not paths:
-            QMessageBox.information(self.widget, "알림", "선택된 항목이 없어!")
+            QMessageBox.information(self.widget, "알림", "선택된 항목이 없습니다.")
             return
         self.publish({"action": "queue_sequence", "paths": paths, "run": True})
 
     def request_queue_filtered_all(self):
         paths = self.get_visible_paths()
         if not paths:
-            QMessageBox.information(self.widget, "알림", "필터 결과가 비어있어!")
+            QMessageBox.information(self.widget, "알림", "필터 결과가 비어 있습니다.")
             return
         self.publish({"action": "queue_sequence", "paths": paths, "run": True})
 
     def request_auto_refine_generate(self):
         paths = self.get_selected_paths()
         if len(paths) != 1:
-            QMessageBox.information(self.widget, "알림", "자동 점검은 프롬프트 1개를 선택해줘!")
+            QMessageBox.information(self.widget, "알림", "자동 점검은 프롬프트 1개를 선택하세요.")
             return
 
-        image_path = (self.image_path_edit.text() if self.image_path_edit else "").strip()
-        provider = (self.provider_edit.text() if self.provider_edit else "openai").strip() or "openai"
-        model = (self.model_edit.text() if self.model_edit else "gpt-4.1").strip() or "gpt-4.1"
+        api_key = (self.api_key_edit.text() if self.api_key_edit else "").strip()
+        if not api_key:
+            QMessageBox.warning(self.widget, "입력 오류", "API Key를 먼저 입력하세요.")
+            return
 
         try:
             max_retry = max(1, int((self.max_retry_edit.text() if self.max_retry_edit else "3").strip()))
             seed_step = int((self.seed_step_edit.text() if self.seed_step_edit else "97").strip())
         except ValueError:
-            QMessageBox.warning(self.widget, "입력 오류", "최대재시도/시드증분은 숫자여야 해.")
+            QMessageBox.warning(self.widget, "입력 오류", "Max Retry / Seed Step은 숫자여야 합니다.")
             return
 
+        provider = self.provider_combo.currentText() if self.provider_combo else "openai"
+        model = (self.model_edit.text() if self.model_edit else "gpt-4.1").strip() or "gpt-4.1"
+        image_path = (self.image_path_edit.text() if self.image_path_edit else "").strip()
         issue_hint = (self.issue_hint_edit.text() if self.issue_hint_edit else "").strip()
         fix_note = (self.fix_log_edit.toPlainText() if self.fix_log_edit else "").strip()
+        base_url = (self.base_url_edit.text() if self.base_url_edit else "").strip()
 
         payload = {
             "action": "auto_refine_generate",
@@ -570,7 +642,9 @@ QTableWidget::item:selected {
             "judge": {
                 "provider": provider,
                 "model": model,
-                "instruction": "이미지의 해부학/구도/노이즈 오류를 점검하고 최소 수정 프롬프트를 제안",
+                "api_key": api_key,
+                "base_url": base_url,
+                "instruction": "이미지 이상 부위를 찾고 짧은 수정 프롬프트를 제안",
             },
             "retry_policy": {
                 "max_attempts": max_retry,
@@ -582,29 +656,67 @@ QTableWidget::item:selected {
 
         self.publish(payload)
         self._write_fix_log(
-            title="auto_refine_generate",
-            prompt_path=paths[0],
-            summary=fix_note or "자동 점검 재생성 요청",
-            detail={
-                "image_path": image_path,
+            "auto_refine_generate",
+            paths[0],
+            fix_note or "자동 점검+재생성 요청",
+            {
                 "provider": provider,
                 "model": model,
+                "image_path": image_path,
                 "max_retry": max_retry,
                 "seed_step": seed_step,
                 "issue_hint": issue_hint,
             },
         )
-        QMessageBox.information(self.widget, "요청 완료", "자동 점검+재생성 요청을 보냈고 로그를 저장했어.")
+        self.reload_log_list()
+        QMessageBox.information(self.widget, "완료", "자동 점검 요청 전송 + 로그 저장 완료")
 
     def save_fix_log_only(self):
         paths = self.get_selected_paths()
         prompt_path = paths[0] if paths else "(none)"
         summary = (self.fix_log_edit.toPlainText() if self.fix_log_edit else "").strip()
         if not summary:
-            QMessageBox.information(self.widget, "로그", "수정 로그 내용이 비어있어.")
+            QMessageBox.information(self.widget, "로그", "수정 로그가 비어 있습니다.")
             return
-        out = self._write_fix_log("manual_fix_note", prompt_path, summary, detail={})
-        QMessageBox.information(self.widget, "로그 저장", f"저장됨: {out.name}")
+        self._write_fix_log("manual_fix_note", prompt_path, summary, {})
+        self.reload_log_list()
+        QMessageBox.information(self.widget, "저장", "수정 로그를 저장했습니다.")
+
+    def _save_api_settings(self):
+        if not self.api_settings_path:
+            return
+        data = {
+            "provider": self.provider_combo.currentText() if self.provider_combo else "openai",
+            "model": self.model_edit.text() if self.model_edit else "",
+            "api_key": self.api_key_edit.text() if self.api_key_edit else "",
+            "base_url": self.base_url_edit.text() if self.base_url_edit else "",
+            "max_retry": self.max_retry_edit.text() if self.max_retry_edit else "3",
+            "seed_step": self.seed_step_edit.text() if self.seed_step_edit else "97",
+        }
+        self.api_settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        QMessageBox.information(self.widget, "저장", f"API 설정 저장됨\n{self.api_settings_path}")
+
+    def _load_api_settings(self):
+        if not self.api_settings_path or not self.api_settings_path.exists():
+            return
+        try:
+            data = json.loads(self.api_settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+
+        if self.provider_combo:
+            idx = self.provider_combo.findText(str(data.get("provider", "openai")))
+            self.provider_combo.setCurrentIndex(0 if idx < 0 else idx)
+        if self.model_edit:
+            self.model_edit.setText(str(data.get("model", "gpt-4.1")))
+        if self.api_key_edit:
+            self.api_key_edit.setText(str(data.get("api_key", "")))
+        if self.base_url_edit:
+            self.base_url_edit.setText(str(data.get("base_url", "")))
+        if self.max_retry_edit:
+            self.max_retry_edit.setText(str(data.get("max_retry", "3")))
+        if self.seed_step_edit:
+            self.seed_step_edit.setText(str(data.get("seed_step", "97")))
 
     def _write_fix_log(self, title: str, prompt_path: str, summary: str, detail: Dict[str, Any]) -> Path:
         target = _next_numbered_txt(self.log_dir or (self.library_dir / "fix_logs"))
@@ -619,6 +731,28 @@ QTableWidget::item:selected {
             lines.append(f"- {k}: {v}")
         target.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return target
+
+    def reload_log_list(self):
+        if not self.log_list:
+            return
+        self.log_list.clear()
+        if not self.log_dir:
+            return
+
+        logs = sorted(self.log_dir.glob("*.txt"), key=_natural_key, reverse=True)
+        for p in logs:
+            item = QListWidgetItem(p.name)
+            item.setData(Qt.ItemDataRole.UserRole, str(p))
+            self.log_list.addItem(item)
+
+    def on_log_selected(self, item: QListWidgetItem):
+        if not self.log_preview:
+            return
+        path = Path(str(item.data(Qt.ItemDataRole.UserRole)))
+        if not path.exists():
+            self.log_preview.setPlainText("로그 파일을 찾을 수 없습니다.")
+            return
+        self.log_preview.setPlainText(_read_text_file(path))
 
 
 def setup(app_context=None):
