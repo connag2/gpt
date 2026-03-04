@@ -156,6 +156,7 @@ class PromptLibraryModule(BaseMiddleModule):
         self.name_edit: Optional[QLineEdit] = None
         self.text_edit: Optional[QTextEdit] = None
 
+        self.judge_mode_combo: Optional[QComboBox] = None
         self.provider_combo: Optional[QComboBox] = None
         self.model_combo: Optional[QComboBox] = None
         self.api_key_edit: Optional[QLineEdit] = None
@@ -310,6 +311,14 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(10)
 
+        self.judge_mode_combo = QComboBox()
+        self.judge_mode_combo.addItems([
+            "api_openai_or_gemini",
+            "local_yolo_anatomy",
+            "local_mediapipe_pose_hand",
+            "local_aesthetic_clip",
+        ])
+
         self.provider_combo = QComboBox()
         self.provider_combo.addItems(["openai", "gemini"])
         self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
@@ -328,7 +337,7 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         self.latest_image_label = QLabel("latest image: (탐색 중)")
         self.latest_image_label.setWordWrap(True)
 
-        self.issue_status_label = QLabel("판정 기준: 의도와 다르거나 부자연스러우면 FAIL")
+        self.issue_status_label = QLabel("판정 기준: 의도와 다르거나 부자연스러우면 FAIL (Gemini 제안: 로컬 YOLO/MediaPipe/Aesthetic 가능)")
         self.issue_status_label.setStyleSheet("color:#D8D8D8;")
 
         self.fix_log_edit = QTextEdit()
@@ -336,10 +345,14 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         self.fix_log_edit.setMinimumHeight(100)
 
         row = 0
-        grid.addWidget(QLabel("Provider"), row, 0)
-        grid.addWidget(self.provider_combo, row, 1)
-        grid.addWidget(QLabel("Model"), row, 2)
-        grid.addWidget(self.model_combo, row, 3)
+        grid.addWidget(QLabel("Judge"), row, 0)
+        grid.addWidget(self.judge_mode_combo, row, 1)
+        grid.addWidget(QLabel("Provider"), row, 2)
+        grid.addWidget(self.provider_combo, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("Model"), row, 0)
+        grid.addWidget(self.model_combo, row, 1, 1, 3)
         row += 1
 
         grid.addWidget(QLabel("API Key"), row, 0)
@@ -722,6 +735,11 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         self.publish({"action": "queue_clear", "run": False})
 
     def test_api_auth(self):
+        judge_mode = self.judge_mode_combo.currentText() if self.judge_mode_combo else "api_openai_or_gemini"
+        if judge_mode != "api_openai_or_gemini":
+            QMessageBox.information(self.widget, "검수", "현재 Judge 모드는 로컬 추론 모드입니다. API 인증 테스트는 건너뜁니다.")
+            return
+
         provider = self.provider_combo.currentText() if self.provider_combo else "openai"
         api_key = (self.api_key_edit.text() if self.api_key_edit else "").strip()
         base_url = (self.base_url_edit.text() if self.base_url_edit else "").strip()
@@ -771,8 +789,9 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
             QMessageBox.information(self.widget, "알림", "자동 점검은 프롬프트 1개를 선택하세요.")
             return
 
+        judge_mode = self.judge_mode_combo.currentText() if self.judge_mode_combo else "api_openai_or_gemini"
         api_key = (self.api_key_edit.text() if self.api_key_edit else "").strip()
-        if not api_key:
+        if judge_mode == "api_openai_or_gemini" and not api_key:
             QMessageBox.warning(self.widget, "입력 오류", "API Key를 먼저 입력하세요.")
             return
 
@@ -791,11 +810,17 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
             "run": True,
             "image_path": image_path,
             "judge": {
+                "mode": judge_mode,
                 "provider": provider,
                 "model": model,
-                "api_key": api_key,
+                "api_key": api_key if judge_mode == "api_openai_or_gemini" else "",
                 "base_url": base_url,
                 "fail_if": "output_is_weird_or_unnatural_for_prompt_intent",
+                "local_options": {
+                    "yolo_anatomy_check": judge_mode == "local_yolo_anatomy",
+                    "mediapipe_pose_hand_check": judge_mode == "local_mediapipe_pose_hand",
+                    "aesthetic_clip_check": judge_mode == "local_aesthetic_clip",
+                },
             },
             "retry_policy": {
                 "mode": "random_until_pass",
@@ -813,6 +838,7 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
             paths[0],
             fix_note or "의도와 다르거나 부자연스러우면 퇴짜 후 랜덤 재시도",
             {
+                "judge_mode": judge_mode,
                 "provider": provider,
                 "model": model,
                 "image_path": image_path,
@@ -839,6 +865,7 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         if not self.api_settings_path:
             return
         data = {
+            "judge_mode": self.judge_mode_combo.currentText() if self.judge_mode_combo else "api_openai_or_gemini",
             "provider": self.provider_combo.currentText() if self.provider_combo else "openai",
             "model": self.model_combo.currentText() if self.model_combo else "gpt-4.1",
             "api_key": self.api_key_edit.text() if self.api_key_edit else "",
@@ -854,6 +881,11 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
             data = json.loads(self.api_settings_path.read_text(encoding="utf-8"))
         except Exception:
             return
+
+        judge_mode = str(data.get("judge_mode", "api_openai_or_gemini"))
+        if self.judge_mode_combo:
+            idx = self.judge_mode_combo.findText(judge_mode)
+            self.judge_mode_combo.setCurrentIndex(0 if idx < 0 else idx)
 
         provider = str(data.get("provider", "openai"))
         if self.provider_combo:
