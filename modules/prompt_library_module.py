@@ -41,6 +41,8 @@ from PyQt6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QDoubleSpinBox,
+    QSpinBox,
 )
 
 try:
@@ -161,6 +163,8 @@ class PromptLibraryModule(BaseMiddleModule):
         self.model_combo: Optional[QComboBox] = None
         self.api_key_edit: Optional[QLineEdit] = None
         self.base_url_edit: Optional[QLineEdit] = None
+        self.aesthetic_threshold_spin: Optional[QDoubleSpinBox] = None
+        self.anatomy_error_limit_spin: Optional[QSpinBox] = None
 
         self.latest_image_label: Optional[QLabel] = None
         self.issue_status_label: Optional[QLabel] = None
@@ -334,6 +338,15 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         self.base_url_edit = QLineEdit()
         self.base_url_edit.setPlaceholderText("선택: 커스텀 Base URL")
 
+        self.aesthetic_threshold_spin = QDoubleSpinBox()
+        self.aesthetic_threshold_spin.setRange(0.0, 10.0)
+        self.aesthetic_threshold_spin.setSingleStep(0.1)
+        self.aesthetic_threshold_spin.setValue(5.0)
+
+        self.anatomy_error_limit_spin = QSpinBox()
+        self.anatomy_error_limit_spin.setRange(0, 20)
+        self.anatomy_error_limit_spin.setValue(1)
+
         self.latest_image_label = QLabel("latest image: (탐색 중)")
         self.latest_image_label.setWordWrap(True)
 
@@ -363,12 +376,22 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         grid.addWidget(self.base_url_edit, row, 1, 1, 3)
         row += 1
 
+        grid.addWidget(QLabel("Aesthetic 임계값"), row, 0)
+        grid.addWidget(self.aesthetic_threshold_spin, row, 1)
+        grid.addWidget(QLabel("Anatomy 오류 허용"), row, 2)
+        grid.addWidget(self.anatomy_error_limit_spin, row, 3)
+        row += 1
+
         grid.addWidget(QLabel("최근 이미지"), row, 0)
         grid.addWidget(self.latest_image_label, row, 1, 1, 3)
         row += 1
 
         grid.addWidget(QLabel("판정"), row, 0)
         grid.addWidget(self.issue_status_label, row, 1, 1, 3)
+        row += 1
+
+        grid.addWidget(QLabel("로컬 안내"), row, 0)
+        grid.addWidget(QLabel("local_* 모드는 controller에서 ultralytics/mediapipe/clip 모델이 준비되어야 동작"), row, 1, 1, 3)
         row += 1
 
         grid.addWidget(QLabel("Fix Log"), row, 0)
@@ -759,6 +782,25 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
             self.reload_log_list()
             QMessageBox.warning(self.widget, "인증 결과", err)
 
+
+    def _build_local_options(self, judge_mode: str) -> Dict[str, Any]:
+        mapping = {
+            "local_yolo_anatomy": "yolo_anatomy_check",
+            "local_mediapipe_pose_hand": "mediapipe_pose_hand_check",
+            "local_aesthetic_clip": "aesthetic_clip_check",
+        }
+        options = {
+            "yolo_anatomy_check": False,
+            "mediapipe_pose_hand_check": False,
+            "aesthetic_clip_check": False,
+        }
+        key = mapping.get(judge_mode)
+        if key:
+            options[key] = True
+        options["aesthetic_threshold"] = float(self.aesthetic_threshold_spin.value()) if self.aesthetic_threshold_spin else 5.0
+        options["anatomy_error_limit"] = int(self.anatomy_error_limit_spin.value()) if self.anatomy_error_limit_spin else 1
+        return options
+
     def _probe_api(self, provider: str, api_key: str, base_url: str) -> Tuple[bool, str]:
         if provider == "openai":
             url = (base_url.rstrip("/") + "/models") if base_url else "https://api.openai.com/v1/models"
@@ -804,6 +846,8 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         image_path = str(latest) if latest else ""
         random_seed = random.randint(1, 2_147_483_647)
 
+        local_options = self._build_local_options(judge_mode)
+
         payload = {
             "action": "auto_refine_generate",
             "paths": [paths[0]],
@@ -816,10 +860,10 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
                 "api_key": api_key if judge_mode == "api_openai_or_gemini" else "",
                 "base_url": base_url,
                 "fail_if": "output_is_weird_or_unnatural_for_prompt_intent",
-                "local_options": {
-                    "yolo_anatomy_check": judge_mode == "local_yolo_anatomy",
-                    "mediapipe_pose_hand_check": judge_mode == "local_mediapipe_pose_hand",
-                    "aesthetic_clip_check": judge_mode == "local_aesthetic_clip",
+                "local_options": local_options,
+                "backend_hints": {
+                    "expected_controller": "generation_controller_or_judge_manager",
+                    "yolo_reference_model": "person_yolov8n-seg.pt",
                 },
             },
             "retry_policy": {
@@ -844,6 +888,7 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
                 "image_path": image_path,
                 "random_seed": random_seed,
                 "mode": "random_until_pass",
+                "max_attempts": 0,
             },
         )
         self.reload_log_list()
@@ -870,6 +915,8 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
             "model": self.model_combo.currentText() if self.model_combo else "gpt-4.1",
             "api_key": self.api_key_edit.text() if self.api_key_edit else "",
             "base_url": self.base_url_edit.text() if self.base_url_edit else "",
+            "aesthetic_threshold": float(self.aesthetic_threshold_spin.value()) if self.aesthetic_threshold_spin else 5.0,
+            "anatomy_error_limit": int(self.anatomy_error_limit_spin.value()) if self.anatomy_error_limit_spin else 1,
         }
         self.api_settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         QMessageBox.information(self.widget, "저장", f"API 설정 저장됨\n{self.api_settings_path}")
@@ -902,6 +949,10 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
             self.api_key_edit.setText(str(data.get("api_key", "")))
         if self.base_url_edit:
             self.base_url_edit.setText(str(data.get("base_url", "")))
+        if self.aesthetic_threshold_spin:
+            self.aesthetic_threshold_spin.setValue(float(data.get("aesthetic_threshold", 5.0)))
+        if self.anatomy_error_limit_spin:
+            self.anatomy_error_limit_spin.setValue(int(data.get("anatomy_error_limit", 1)))
 
     def _write_fix_log(self, title: str, prompt_path: str, summary: str, detail: Dict[str, Any]) -> Path:
         target = _next_numbered_txt(self.log_dir or (self.library_dir / "fix_logs"))
