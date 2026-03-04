@@ -52,17 +52,25 @@ EVENT_NAME = "prompt_library_event_requested"
 
 OPENAI_MODELS = [
     "gpt-image-1",
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
     "gpt-4.1",
     "gpt-4.1-mini",
+    "gpt-4.1-nano",
     "gpt-4o",
     "gpt-4o-mini",
+    "o3",
     "o4-mini",
 ]
 
 GEMINI_MODELS = [
+    "gemini-2.5-flash-image-preview",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
+    "gemini-2.0-flash-exp",
+    "gemini-2.0-flash-lite",
     "gemini-1.5-pro",
     "gemini-1.5-flash",
 ]
@@ -159,6 +167,7 @@ class PromptLibraryModule(BaseMiddleModule):
 
         self.log_list: Optional[QListWidget] = None
         self.log_preview: Optional[QTextEdit] = None
+        self.queue_list: Optional[QListWidget] = None
 
         self._files: List[Path] = []
 
@@ -249,6 +258,7 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         root.addLayout(actions)
 
         root.addWidget(self._build_auto_refine_box())
+        root.addWidget(self._build_queue_box())
         root.addWidget(self._build_logs_box())
 
         fold_row = QHBoxLayout()
@@ -294,7 +304,7 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         return self.widget
 
     def _build_auto_refine_box(self) -> QGroupBox:
-        box = QGroupBox("자동 점검 + 재생성")
+        box = QGroupBox("API 검수 + 자동 점검 재생성")
         box.setMinimumHeight(300)
         grid = QGridLayout(box)
         grid.setHorizontalSpacing(12)
@@ -305,6 +315,7 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
 
         self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
         self.on_provider_changed("openai")
 
         self.api_key_edit = QLineEdit()
@@ -365,6 +376,35 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
             btn_row.addWidget(btn)
         btn_row.addStretch(1)
         grid.addLayout(btn_row, row, 0, 1, 4)
+        return box
+
+    def _build_queue_box(self) -> QGroupBox:
+        box = QGroupBox("대기열")
+        box.setMinimumHeight(240)
+        v = QVBoxLayout(box)
+
+        guide = QLabel("여러 프롬프트를 먼저 대기열에 넣고, 여기서 다음 1개/전체 실행을 누르세요.")
+        guide.setWordWrap(True)
+        v.addWidget(guide)
+
+        self.queue_list = QListWidget()
+        self.queue_list.setMinimumHeight(140)
+        v.addWidget(self.queue_list)
+
+        row = QHBoxLayout()
+        for text, cb in [
+            ("다음 1개 실행", self.request_queue_run_next),
+            ("전체 실행", self.request_queue_run_all),
+            ("중지 요청", self.request_queue_stop),
+            ("선택 제거", self.request_queue_remove_selected),
+            ("비우기", self.request_queue_clear),
+        ]:
+            btn = QPushButton(text)
+            btn.setMinimumHeight(34)
+            btn.clicked.connect(cb)
+            row.addWidget(btn)
+        row.addStretch(1)
+        v.addLayout(row)
         return box
 
     def _build_logs_box(self) -> QGroupBox:
@@ -626,6 +666,7 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
         if not paths:
             QMessageBox.information(self.widget, "알림", "선택된 항목이 없습니다.")
             return
+        self._append_queue_items(paths)
         self.publish({"action": "queue_sequence", "paths": paths, "run": False})
 
     def request_queue_filtered_all(self):
@@ -634,7 +675,51 @@ QTableWidget::item:selected { background: rgba(120,160,255,0.35); color: #FFFFFF
             QMessageBox.information(self.widget, "알림", "필터 결과가 비어 있습니다.")
             return
         # 요청사항: 전체 대기열은 즉시 실행이 아니라 큐에만 적재
+        self._append_queue_items(paths)
         self.publish({"action": "queue_sequence", "paths": paths, "run": False})
+
+    def _append_queue_items(self, paths: List[str]):
+        if not self.queue_list:
+            return
+        existing = {
+            str(self.queue_list.item(i).data(Qt.ItemDataRole.UserRole))
+            for i in range(self.queue_list.count())
+        }
+        for p in paths:
+            if p in existing:
+                continue
+            item = QListWidgetItem(Path(p).name)
+            item.setToolTip(p)
+            item.setData(Qt.ItemDataRole.UserRole, p)
+            self.queue_list.addItem(item)
+
+    def request_queue_run_next(self):
+        self.publish({"action": "queue_run_next", "run": True})
+
+    def request_queue_run_all(self):
+        self.publish({"action": "queue_run_all", "run": True})
+
+    def request_queue_stop(self):
+        self.publish({"action": "queue_stop", "run": False})
+
+    def request_queue_remove_selected(self):
+        if not self.queue_list:
+            return
+        rows = sorted({idx.row() for idx in self.queue_list.selectedIndexes()}, reverse=True)
+        if not rows:
+            QMessageBox.information(self.widget, "대기열", "제거할 항목을 선택하세요.")
+            return
+        paths: List[str] = []
+        for r in rows:
+            item = self.queue_list.item(r)
+            paths.append(str(item.data(Qt.ItemDataRole.UserRole)))
+            self.queue_list.takeItem(r)
+        self.publish({"action": "queue_remove", "paths": paths, "run": False})
+
+    def request_queue_clear(self):
+        if self.queue_list:
+            self.queue_list.clear()
+        self.publish({"action": "queue_clear", "run": False})
 
     def test_api_auth(self):
         provider = self.provider_combo.currentText() if self.provider_combo else "openai"
